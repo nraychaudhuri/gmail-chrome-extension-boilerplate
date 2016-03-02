@@ -26,7 +26,7 @@ var Gmail = function(localJQuery) {
 
   api.version           = "0.4";
   api.tracker.globals   = typeof GLOBALS !== 'undefined' ? GLOBALS : ( typeof window.opener.GLOBALS !== 'undefined' ? window.opener.GLOBALS : [] );
-  api.tracker.view_data = typeof VIEW_DATA !== 'undefined' ? VIEW_DATA : ( typeof window.opener.VIEW_DATA !== 'undefined' ? window.opener.VIEW_DATA : [] );
+  api.tracker.view_data = typeof VIEW_DATA !== 'undefined' ? VIEW_DATA : ( typeof window.opener != 'undefined' && window.opener != null && typeof window.opener.VIEW_DATA !== 'undefined' ? window.opener.VIEW_DATA : [] );
   api.tracker.ik        = api.tracker.globals[9] || "";
   api.tracker.hangouts  = undefined;
 
@@ -43,11 +43,26 @@ var Gmail = function(localJQuery) {
 
 
   api.get.loggedin_accounts = function() {
-    var data = api.tracker.globals[17][23];
+    var i, j, data;
     var users = [];
 
-    for(var i in data[1]) {
-      users.push({name : data[1][i][4], email : data[1][i][0]})
+    var globals17 = api.tracker.globals[17];
+    for (i in globals17) {
+      // at least for the delegated inboxes, the index of the mla is not stable
+      // it was observed to be somewhere between 22 and 24, but we should not depend on it
+      data = globals17[i];
+
+      if (data[0] === 'mla') {
+        for(j in data[1]) {
+          users.push({
+            name : data[1][j][4],
+            email : data[1][j][0],
+            index: data[1][j][3]
+          });
+        }
+
+        return users;
+      }
     }
 
     return users;
@@ -56,6 +71,40 @@ var Gmail = function(localJQuery) {
 
   api.get.user_email = function() {
     return api.tracker.globals[10];
+  };
+
+
+  api.get.manager_email = function() {
+    if (api.helper.get.is_delegated_inbox()) {
+      return api.get.delegated_to_email();
+    }
+
+    return api.get.user_email();
+  };
+
+
+  api.get.delegated_to_email = function() {
+    if (!api.helper.get.is_delegated_inbox()) {
+      return null;
+    }
+
+    var i, account;
+    var userIndexPrefix = "/u/";
+    var pathname = window.location.pathname;
+    var delegatedToUserIndex = parseInt(pathname.substring(pathname.indexOf(userIndexPrefix) + userIndexPrefix.length), 10);
+
+    var loggedInAccounts = api.get.loggedin_accounts();
+    if (loggedInAccounts && loggedInAccounts.length > 0) {
+      for (i in loggedInAccounts) {
+        account = loggedInAccounts[i];
+        if (account.index === delegatedToUserIndex) {
+          return account.email;
+        }
+      }
+    }
+
+    // as a last resort, we query the DOM of the upper right account selection menu
+    return $(".gb_rb[href$='" + userIndexPrefix + delegatedToUserIndex + "'] .gb_yb").text().split(" ")[0];
   };
 
 
@@ -203,7 +252,7 @@ var Gmail = function(localJQuery) {
 
 
   api.check.is_inside_email = function() {
-    if(api.get.current_page() != null && !api.check.is_preview_pane()) {
+    if(api.get.current_page() != 'email' && !api.check.is_preview_pane()) {
       return false;
     }
 
@@ -222,6 +271,19 @@ var Gmail = function(localJQuery) {
     return ids.length > 0;
   }
 
+  api.check.is_plain_text = function() {
+    var settings = GLOBALS[17][4][1];
+
+    for (var i = 0; i < settings.length; i++) {
+      var plain_text_setting = settings[i];
+      if (plain_text_setting[0] === 'bx_cm') {
+        return plain_text_setting[1] === '0';
+      }
+    }
+
+    // default to rich text mode, which is more common nowadays
+    return false;
+  }
 
   api.dom.email_contents = function() {
     var items = $('.ii.gt');
@@ -861,7 +923,7 @@ var Gmail = function(localJQuery) {
 
           // if before events were fired, rebuild arguments[0]/body strings
           // TODO: recreate the url if we want to support manipulating url args (is there a use case where this would be needed?)
-          body = arguments[0] = this.xhrParams.body_is_object ? this.xhrParams.body_params : $.param(this.xhrParams.body_params,true);
+          body = arguments[0] = this.xhrParams.body_is_object ? this.xhrParams.body_params : $.param(this.xhrParams.body_params,true).replace(/\+/g, "%20");
         }
 
         // if any matching after events, bind onreadystatechange callback
@@ -1436,10 +1498,15 @@ var Gmail = function(localJQuery) {
   }
 
 
+  api.helper.get.is_delegated_inbox = function() {
+    return api.tracker.globals[17][5][0] === 'fwd';
+  }
+
+
   api.helper.get.visible_emails_pre = function() {
     var page = api.get.current_page();
     var url = window.location.origin + window.location.pathname + '?ui=2&ik=' + api.tracker.ik+'&rid=' + api.tracker.rid + '&view=tl&start=0&num=120&rt=1';
-    
+
     if(page.indexOf('label/') == 0) {
       url += '&cat=' + page.split('/')[1] +'&search=cat';
     } else if(page.indexOf('category/') == 0) {
@@ -1477,7 +1544,7 @@ var Gmail = function(localJQuery) {
       if (typeof(api.tracker.view_data[i]) === 'function') {
         continue;
       }
-      
+
       var cdata = api.tools.parse_view_data(api.tracker.view_data[i]);
       if(cdata.length > 0) {
         $.merge(emails, cdata);
@@ -1951,23 +2018,23 @@ var Gmail = function(localJQuery) {
 
     return button;
   }
-  
+
+  api.tools.remove_modal_window = function() {
+    $('#gmailJsModalBackground').remove();
+    $('#gmailJsModalWindow').remove();
+  }
+
   api.tools.add_modal_window = function(title, content_html, onClickOk, onClickCancel, onClickClose) {
-    var remove = function() {
-      $('#gmailJsModalBackground').remove();
-      $('#gmailJsModalWindow').remove();
-    };
-    
     // By default, clicking on cancel or close should clean up the modal window
-    onClickClose = onClickClose || remove;
-    onClickCancel = onClickCancel || remove;
-    
+    onClickClose = onClickClose || api.tools.remove_modal_window;
+    onClickCancel = onClickCancel || api.tools.remove_modal_window;
+
     var background = $(document.createElement('div'));
     background.attr('id','gmailJsModalBackground');
     background.attr('class','Kj-JD-Jh');
     background.attr('aria-hidden','true');
     background.attr('style','opacity:0.75;width:100%;height:100%;');
-    
+
     // Modal window wrapper
     var container = $(document.createElement('div'));
     container.attr('id','gmailJsModalWindow');
@@ -1976,17 +2043,17 @@ var Gmail = function(localJQuery) {
     container.attr('role', 'alertdialog');
     container.attr('aria-labelledby', 'gmailJsModalWindowTitle');
     container.attr('style', 'left:50%;top:50%;opacity:1;');
-    
+
     // Modal window header contents
     var header = $(document.createElement('div'));
     header.attr('class', 'Kj-JD-K7 Kj-JD-K7-GIHV4');
-    
+
     var heading = $(document.createElement('span'));
     heading.attr('id', 'gmailJsModalWindowTitle');
     heading.attr('class', 'Kj-JD-K7-K0');
     heading.attr('role', 'heading');
     heading.html(title);
-    
+
     var closeButton = $(document.createElement('span'));
     closeButton.attr('id', 'gmailJsModalWindowClose');
     closeButton.attr('class', 'Kj-JD-K7-Jq');
@@ -1994,52 +2061,52 @@ var Gmail = function(localJQuery) {
     closeButton.attr('tabindex', '0');
     closeButton.attr('aria-label', 'Close');
     closeButton.click(onClickClose);
-    
+
     header.append(heading);
     header.append(closeButton);
-    
+
     // Modal window contents
     var contents = $(document.createElement('div'));
     contents.attr('id', 'gmailJsModalWindowContent');
     contents.attr('class', 'Kj-JD-Jz');
     contents.html(content_html);
-    
+
     // Modal window controls
     var controls = $(document.createElement('div'));
     controls.attr('class', 'Kj-JD-Jl');
-    
+
     var okButton = $(document.createElement('button'));
     okButton.attr('id', 'gmailJsModalWindowOk');
     okButton.attr('class', 'J-at1-auR J-at1-atl');
     okButton.attr('name', 'ok');
     okButton.text('OK');
     okButton.click(onClickOk);
-    
+
     var cancelButton = $(document.createElement('button'));
     cancelButton.attr('id', 'gmailJsModalWindowCancel');
     cancelButton.attr('name', 'cancel');
     cancelButton.text('Cancel');
     cancelButton.click(onClickCancel);
-    
+
     controls.append(okButton);
     controls.append(cancelButton);
-    
+
     container.append(header);
     container.append(contents);
     container.append(controls);
-    
+
     $(document.body).append(background);
     $(document.body).append(container);
-    
+
     var center = function() {
       container.css({
         top: ($(window).height() - container.outerHeight()) / 2,
         left: ($(window).width() - container.outerWidth()) / 2
       });
     };
-    
+
     center();
-    
+
     $(window).resize(center);
   }
 
@@ -2173,7 +2240,7 @@ var Gmail = function(localJQuery) {
       return subject ? subject : this.dom('subject').val();
     },
 
-    /** 
+    /**
       Get the from email
       if user only has one email account they can send from, returns that email address
       */
